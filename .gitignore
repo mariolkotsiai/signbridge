@@ -1,0 +1,35 @@
+# Python / PyTorch / OpenCV / MediaPipe
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Node dependencies & React build output
+node_modules/
+dist/
+.build/
+
+# Datasets, Raw Videos & Feature NumPy arrays (Strictly ignored)
+ml/datasets/raw/
+*.mp4
+*.avi
+*.mov
+*.npy
+
+# Model Checkpoints & Weights
+*.pt
+*.pth
+*.onnx
+
+# Environment & Credentials
+.env
+.env.local
+*.secret
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
