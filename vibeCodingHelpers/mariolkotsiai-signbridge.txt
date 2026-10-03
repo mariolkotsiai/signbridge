@@ -1,0 +1,804 @@
+Directory structure:
+└── mariolkotsiai-signbridge/
+    ├── README.md
+    ├── CONTRIBUTING.md
+    ├── LICENSE
+    ├── requirements.txt
+    ├── SECURITY.md
+    ├── .env.example
+    ├── docs/
+    │   ├── adr/
+    │   │   └── 001-hardware-and-framework-selection.md
+    │   └── architecture/
+    │       └── system_architecture.md
+    ├── ml/
+    │   ├── __init__.py
+    │   ├── models/
+    │   │   ├── __init__.py
+    │   │   └── sign_model.py
+    │   ├── preprocessing/
+    │   │   └── normalize.py
+    │   └── training/
+    │       └── train.py
+    ├── scripts/
+    │   ├── download_open_samples.py
+    │   ├── extract_landmarks.py
+    │   ├── import_certh_dataset.py
+    │   ├── prepare_open_dataset.py
+    │   └── test_m2_pipeline.py
+    └── services/
+        ├── __init__.py
+        └── inference/
+            ├── __init__.py
+            ├── landmarks_pipeline.py
+            └── live_inference.py
+
+================================================
+FILE: README.md
+================================================
+# SignBridge 
+
+Local-first proof-of-concept for real-time sign language recognition (Greek Sign Language - GSL & American Sign Language - ASL) using a webcam stream and lightweight deep learning models.
+
+## Project Scope (M0–M6 Prototype)
+- **Target Languages:** GSL (ΕΝΓ) and ASL (Explicitly separated profiles).
+- **Architecture:** Webcam → MediaPipe Landmark Extraction → Temporal Classifier → FastAPI Backend → React Web Subtitles UI.
+- **Budget Constraint:** €0 (100% Free / Open Source / Local Execution).
+
+## Hardware & Stack
+- **CPU:** AMD Ryzen 5 5600 (6-Core)
+- **GPU:** AMD Radeon RX 7600 (8GB VRAM)
+- **Backend:** Python 3.11, PyTorch, OpenCV, MediaPipe, FastAPI
+- **Frontend:** React, TypeScript, Vite
+
+
+================================================
+FILE: CONTRIBUTING.md
+================================================
+[Empty file]
+
+
+================================================
+FILE: LICENSE
+================================================
+[Empty file]
+
+
+================================================
+FILE: requirements.txt
+================================================
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+numpy>=1.24.0
+pydantic>=2.0.0
+pytest>=7.0.0
+ruff>=0.1.0
+
+
+================================================
+FILE: SECURITY.md
+================================================
+[Empty file]
+
+
+================================================
+FILE: .env.example
+================================================
+[Empty file]
+
+
+================================================
+FILE: docs/adr/001-hardware-and-framework-selection.md
+================================================
+# ADR 001: Hardware Architecture & Framework Selection
+
+## Status
+Accepted
+
+## Context
+Project requires real-time GSL/ASL sign recognition running locally on a zero-budget setup (€0).
+Development environment specs: AMD Ryzen 5 5600 (6-core CPU), AMD Radeon RX 7600 (8GB VRAM), Windows OS.
+
+## Decision
+1. **Pipeline Execution:** Use CPU (Ryzen 5600) for MediaPipe Landmark Extraction and PyTorch CPU inference (latency < 10ms per window for lightweight LSTMs).
+2. **Framework Stack:** Python 3.11, PyTorch (CPU/ROCm optional), OpenCV, MediaPipe, FastAPI, React + TypeScript + Vite.
+3. **Language Model Separation:** GSL and ASL maintain completely distinct feature datasets, model binaries, and class mappings.
+
+## Consequences
+- Zero cloud cost.
+- High inference speed (30+ FPS capability).
+- Strict separation prevents language collision bugs.
+
+
+================================================
+FILE: docs/architecture/system_architecture.md
+================================================
+graph TD
+    A[Webcam Stream] -->|MediaStream API| B[Browser React Client]
+    B -->|WebSocket / HTTP Frame Stream| C[FastAPI Inference Gateway]
+    C -->|Raw Frame / Image| D[MediaPipe Landmark Extractor]
+    D -->|Hand + Pose + Face Coordinates| E[Sequence Normalizer & Buffer]
+    E -->|Normalized Tensor shape: [T, Keypoints]| F{Profile Selector}
+    F -->|GSL Selected| G[GSL PyTorch LSTM/Transformer Model]
+    F -->|ASL Selected| H[ASL PyTorch LSTM/Transformer Model]
+    G -->|Probability Vector| I[Confidence Filter & Threshold Check]
+    H -->|Probability Vector| I
+    I -->|> Threshold| J[Predicted Sign Label]
+    I -->|< Threshold| K[State: UNKNOWN / UNCERTAIN]
+    J --> L[WebSocket JSON Response]
+    K --> L
+    L -->|Update Subtitles & FPS UI| B
+
+
+================================================
+FILE: ml/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: ml/models/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: ml/models/sign_model.py
+================================================
+import torch
+import torch.nn as nn
+
+
+class SignLanguageLSTM(nn.Module):
+    """
+    LSTM classifier for sign language landmark sequences.
+
+    Input shape:  (batch_size, seq_len, input_size)
+        - seq_len:    number of frames per sample (π.χ. 30)
+        - input_size: αριθμός landmark features ανά frame (π.χ. 126
+                      = 2 χέρια * 21 σημεία * 3 συντεταγμένες)
+
+    Output shape: (batch_size, num_classes) — raw logits (χωρίς softmax,
+                  γιατί χρησιμοποιείται με nn.CrossEntropyLoss).
+    """
+
+    def __init__(self, num_classes, input_size=126, hidden_size=128,
+                 num_layers=2, dropout=0.3):
+        super(SignLanguageLSTM, self).__init__()
+
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=True,
+        )
+
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size * 2, num_classes)  # *2 λόγω bidirectional
+
+    def forward(self, x):
+        # x: (batch, seq_len, input_size)
+        lstm_out, (h_n, c_n) = self.lstm(x)
+
+        # Παίρνουμε το τελευταίο hidden state και από τις 2 κατευθύνσεις
+        # h_n shape: (num_layers * num_directions, batch, hidden_size)
+        last_forward = h_n[-2]   # τελευταίο layer, forward direction
+        last_backward = h_n[-1]  # τελευταίο layer, backward direction
+        combined = torch.cat((last_forward, last_backward), dim=1)  # (batch, hidden_size*2)
+
+        out = self.dropout(combined)
+        out = self.fc(out)  # (batch, num_classes)
+        return out
+
+
+================================================
+FILE: ml/preprocessing/normalize.py
+================================================
+import numpy as np
+
+def extract_hand_keypoints(results) -> np.ndarray:
+    """
+    Εξάγει τις συντεταγμένες (X, Y, Z) για αριστερό και δεξί χέρι
+    από το MediaPipe Tasks HandLandmarkerResult.
+    """
+    lh = np.zeros(21 * 3)
+    rh = np.zeros(21 * 3)
+
+    if hasattr(results, 'hand_landmarks') and results.hand_landmarks:
+        # 1ο Χέρι
+        if len(results.hand_landmarks) > 0:
+            lh = np.array([[lm.x, lm.y, lm.z] for lm in results.hand_landmarks[0]]).flatten()
+        # 2ο Χέρι
+        if len(results.hand_landmarks) > 1:
+            rh = np.array([[lm.x, lm.y, lm.z] for lm in results.hand_landmarks[1]]).flatten()
+
+    return np.concatenate([lh, rh])
+
+
+def normalize_sequence(sequence: np.ndarray, target_frames: int = 30) -> np.ndarray:
+    """
+    Κανονικοποιεί το μήκος της αλληλουχίας frames σε σταθερό target_frames (30).
+    """
+    num_frames = len(sequence)
+    if num_frames == 0:
+        return np.zeros((target_frames, 126))
+
+    if num_frames == target_frames:
+        return np.array(sequence)
+
+    indices = np.linspace(0, num_frames - 1, target_frames).astype(int)
+    return np.array(sequence)[indices]
+
+
+================================================
+FILE: ml/training/train.py
+================================================
+import os
+import sys
+
+# Εξασφάλιση ότι το root directory μπαίνει πρώτο στο sys.path
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+import glob
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+
+try:
+    from ml.models.sign_model import SignLanguageLSTM
+except ModuleNotFoundError:
+    # Fallback σε περίπτωση που εκτελείται από διαφορετικό Working Directory
+    from models.sign_model import SignLanguageLSTM
+
+
+class LandmarkDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.long)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+def train_model(language='gsl', epochs=20, lr=0.001):
+    dataset_dir = os.path.join(PROJECT_ROOT, f"ml/datasets/{language}/raw_landmarks")
+    file_paths = glob.glob(os.path.join(dataset_dir, "*.npy"))
+
+    if not file_paths:
+        print(f"[ERROR] Δεν βρέθηκαν .npy αρχεία στον φάκελο: {dataset_dir}")
+        return
+
+    # Συλλογή labels
+    labels_set = sorted(list(set([os.path.basename(p).split('_sample_')[0].split('_open_')[0] for p in file_paths])))
+    label_to_id = {label: i for i, label in enumerate(labels_set)}
+
+    X, y = [], []
+    for p in file_paths:
+        data = np.load(p)
+        label_name = os.path.basename(p).split('_sample_')[0].split('_open_')[0]
+        if label_name in label_to_id:
+            X.append(data)
+            y.append(label_to_id[label_name])
+
+    X = np.array(X)
+    y = np.array(y)
+
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    train_loader = DataLoader(LandmarkDataset(X_train, y_train), batch_size=8, shuffle=True)
+    val_loader = DataLoader(LandmarkDataset(X_val, y_val), batch_size=8, shuffle=False)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = SignLanguageLSTM(num_classes=len(labels_set)).to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    print(f"\n--- Έναρξη Εκπαίδευσης Μοντέλου [{language.upper()}] ({len(labels_set)} κλάσεις) ---")
+    for epoch in range(1, epochs + 1):
+        model.train()
+        train_loss = 0.0
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            optimizer.zero_grad()
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+
+        # Validation
+        model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                outputs = model(X_batch)
+                _, predicted = torch.max(outputs, 1)
+                total += y_batch.size(0)
+                correct += (predicted == y_batch).sum().item()
+
+        val_acc = (correct / total) * 100 if total > 0 else 0.0
+        print(f"Epoch [{epoch}/{epochs}] - Loss: {train_loss/len(train_loader):.4f} | Val Accuracy: {val_acc:.1f}%")
+
+    # Αποθήκευση Μοντέλου
+    weights_dir = os.path.join(PROJECT_ROOT, "services/inference/weights")
+    os.makedirs(weights_dir, exist_ok=True)
+    model_path = os.path.join(weights_dir, f"{language}_model.pth")
+    torch.save({'model_state': model.state_dict(), 'labels': labels_set}, model_path)
+    print(f"\n[SUCCESS] Το μοντέλο αποθηκεύτηκε στο: {model_path}")
+
+
+if __name__ == "__main__":
+    train_model(language='gsl', epochs=15)
+    train_model(language='asl', epochs=15)
+
+
+================================================
+FILE: scripts/download_open_samples.py
+================================================
+import os
+import sys
+import urllib.request
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# 1. Direct MP4 Links (για ASL)
+DIRECT_SAMPLES = {
+    "asl": {
+        "HELLO": [
+            "https://raw.githubusercontent.com/dxli94/WLASL/master/start_kit/video_samples/00100.mp4",
+            "https://raw.githubusercontent.com/dxli94/WLASL/master/start_kit/video_samples/00101.mp4"
+        ],
+        "THANK_YOU": [
+            "https://raw.githubusercontent.com/dxli94/WLASL/master/start_kit/video_samples/00200.mp4",
+            "https://raw.githubusercontent.com/dxli94/WLASL/master/start_kit/video_samples/00201.mp4"
+        ]
+    }
+}
+
+# 2. YouTube Links (για GSL)
+YOUTUBE_SAMPLES = {
+    "gsl": {
+        "ΓΕΙΑ": [
+            "https://www.youtube.com/watch?v=jwf5f2AnAE8&list=PLv-TYzCHI-uasqs-Bl0_rlPqrW7TkQGk3&index=3",
+        ],
+        "ΕΥΧΑΡΙΣΤΩ": [
+            "https://www.youtube.com/watch?v=Yw4Mr0Se_P4&list=PLv-TYzCHI-uasqs-Bl0_rlPqrW7TkQGk3&index=27",
+        ]
+    }
+}
+
+
+def download_direct_files():
+    print("--- 1. Λήψη Direct MP4 Βίντεο (ASL) ---")
+    for lang, labels in DIRECT_SAMPLES.items():
+        for label, urls in labels.items():
+            target_dir = os.path.join(PROJECT_ROOT, f"ml/raw_videos/{lang}/{label}")
+            os.makedirs(target_dir, exist_ok=True)
+            
+            for idx, url in enumerate(urls):
+                file_path = os.path.join(target_dir, f"{label}_sample_{idx+1}.mp4")
+                if not os.path.exists(file_path):
+                    print(f"Κατέβασμα: [{lang.upper()}] {label} ({idx+1}/{len(urls)})...")
+                    try:
+                        urllib.request.urlretrieve(url, file_path)
+                        print(f"  [OK] Αποθηκεύτηκε στο: {file_path}")
+                    except Exception as e:
+                        print(f"  [ERROR] Αποτυχία λήψης: {e}")
+                else:
+                    print(f"  [SKIP] Το αρχείο υπάρχει ήδη: {file_path}")
+
+
+def download_youtube_files():
+    print("\n--- 2. Λήψη YouTube Βίντεο (GSL) ---")
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError:
+        print("[WARNING] Το yt-dlp δεν είναι εγκατεστημένο. Τρέξε: pip install yt-dlp")
+        return
+
+    for lang, labels in YOUTUBE_SAMPLES.items():
+        for label, urls in labels.items():
+            if not urls:
+                continue
+            
+            target_dir = os.path.join(PROJECT_ROOT, f"ml/raw_videos/{lang}/{label}")
+            os.makedirs(target_dir, exist_ok=True)
+
+            ydl_opts = {
+                'format': 'mp4/best',
+                'outtmpl': os.path.join(target_dir, '%(id)s.%(ext)s'),
+                'quiet': True
+            }
+
+            with YoutubeDL(ydl_opts) as ydl:
+                for url in urls:
+                    try:
+                        print(f"Κατέβασμα YouTube [{lang.upper()}]: {label}...")
+                        ydl.download([url])
+                        print(f"  [OK] Ολοκληρώθηκε.")
+                    except Exception as e:
+                        print(f"  [ERROR] Αποτυχία λήψης για {url}: {e}")
+
+
+if __name__ == "__main__":
+    download_direct_files()
+    download_youtube_files()
+    print("\n[SUCCESS] Η διαδικασία λήψης ολοκληρώθηκε!")
+
+
+================================================
+FILE: scripts/extract_landmarks.py
+================================================
+import os
+import numpy as np
+import cv2
+import mediapipe as mp
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+RAW_VIDEOS_DIR = os.path.join(PROJECT_ROOT, "ml", "raw_videos")
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "ml", "processed_landmarks")
+
+mp_holistic = mp.solutions.holistic
+
+POSE_POINTS = 33
+HAND_POINTS = 21
+
+
+def extract_landmarks_from_path(input_path, holistic):
+    """
+    Διαβάζει είτε βίντεο (.mp4) είτε φάκελο με εικόνες (.png/.jpg)
+    και επιστρέφει numpy array σχήματος (num_frames, (33 + 21 + 21) * 3).
+    """
+    sequence = []
+
+    # ΠΕΡΙΠΤΩΣΗ 1: Φάκελος με PNG/JPG Frames (CERTH Dataset)
+    if os.path.isdir(input_path):
+        image_files = sorted([
+            os.path.join(input_path, f) for f in os.listdir(input_path)
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ])
+        for img_path in image_files:
+            frame = cv2.imread(img_path)
+            if frame is None:
+                continue
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = holistic.process(frame_rgb)
+
+            pose = (np.array([[lm.x, lm.y, lm.z] for lm in results.pose_landmarks.landmark]).flatten()
+                    if results.pose_landmarks else np.zeros(POSE_POINTS * 3))
+            left_hand = (np.array([[lm.x, lm.y, lm.z] for lm in results.left_hand_landmarks.landmark]).flatten()
+                         if results.left_hand_landmarks else np.zeros(HAND_POINTS * 3))
+            right_hand = (np.array([[lm.x, lm.y, lm.z] for lm in results.right_hand_landmarks.landmark]).flatten()
+                          if results.right_hand_landmarks else np.zeros(HAND_POINTS * 3))
+
+            sequence.append(np.concatenate([pose, left_hand, right_hand]))
+
+    # ΠΕΡΙΠΤΩΣΗ 2: Αρχείο Βίντεο MP4
+    elif os.path.isfile(input_path) and input_path.lower().endswith(('.mp4', '.avi', '.mov')):
+        cap = cv2.VideoCapture(input_path)
+        while cap.isOpened():
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = holistic.process(frame_rgb)
+
+            pose = (np.array([[lm.x, lm.y, lm.z] for lm in results.pose_landmarks.landmark]).flatten()
+                    if results.pose_landmarks else np.zeros(POSE_POINTS * 3))
+            left_hand = (np.array([[lm.x, lm.y, lm.z] for lm in results.left_hand_landmarks.landmark]).flatten()
+                         if results.left_hand_landmarks else np.zeros(HAND_POINTS * 3))
+            right_hand = (np.array([[lm.x, lm.y, lm.z] for lm in results.right_hand_landmarks.landmark]).flatten()
+                          if results.right_hand_landmarks else np.zeros(HAND_POINTS * 3))
+
+            sequence.append(np.concatenate([pose, left_hand, right_hand]))
+        cap.release()
+
+    return np.array(sequence, dtype=np.float32)
+
+
+def process_all_raw_data():
+    if not os.path.exists(RAW_VIDEOS_DIR):
+        print(f"[ERROR] Δεν βρέθηκε ο φάκελος {RAW_VIDEOS_DIR}.")
+        return
+
+    with mp_holistic.Holistic(
+        static_image_mode=False,
+        model_complexity=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    ) as holistic:
+
+        for lang in sorted(os.listdir(RAW_VIDEOS_DIR)):
+            lang_dir = os.path.join(RAW_VIDEOS_DIR, lang)
+            if not os.path.isdir(lang_dir):
+                continue
+
+            for label in sorted(os.listdir(lang_dir)):
+                label_dir = os.path.join(lang_dir, label)
+                if not os.path.isdir(label_dir):
+                    continue
+
+                out_dir = os.path.join(OUTPUT_DIR, lang, label)
+                os.makedirs(out_dir, exist_ok=True)
+
+                for item in sorted(os.listdir(label_dir)):
+                    item_path = os.path.join(label_dir, item)
+                    sample_id = os.path.splitext(item)[0]
+                    out_path = os.path.join(out_dir, f"{sample_id}.npy")
+
+                    if os.path.exists(out_path):
+                        print(f"  [SKIP] Υπάρχει ήδη: {out_path}")
+                        continue
+
+                    print(f"Εξαγωγή landmarks: [{lang.upper()}] {label} / {item}...")
+                    try:
+                        sequence = extract_landmarks_from_path(item_path, holistic)
+                        if sequence.size == 0:
+                            print(f"  [WARNING] Κενή ακολουθία: {item_path}")
+                            continue
+                        np.save(out_path, sequence)
+                        print(f"  [OK] shape={sequence.shape} -> {out_path}")
+                    except Exception as e:
+                        print(f"  [ERROR] Αποτυχία εξαγωγής: {e}")
+
+
+if __name__ == "__main__":
+    process_all_raw_data()
+    print("\n[SUCCESS] Η εξαγωγή landmarks ολοκληρώθηκε!")
+
+
+================================================
+FILE: scripts/import_certh_dataset.py
+================================================
+[Binary file]
+
+
+================================================
+FILE: scripts/prepare_open_dataset.py
+================================================
+import os
+import sys
+import numpy as np
+import cv2
+
+# Προσθήκη του root directory στο PYTHONPATH
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from services.inference.landmarks_pipeline import LandmarkExtractor
+from ml.preprocessing.normalize import extract_hand_keypoints, normalize_sequence
+
+
+def process_video_file(video_path: str, extractor: LandmarkExtractor) -> np.ndarray:
+    """
+    Διαβάζει ένα αρχείο βίντεο και εξάγει κανονικοποιημένα landmarks 30 frames.
+    """
+    cap = cv2.VideoCapture(video_path)
+    sequence_data = []
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        _, results, _ = extractor.process_frame(frame)
+        keypoints = extract_hand_keypoints(results)
+        sequence_data.append(keypoints)
+
+    cap.release()
+    return normalize_sequence(sequence_data, target_frames=30)
+
+
+def convert_dataset_videos(language='gsl'):
+    """
+    Διαβάζει όλα τα βίντεο από τον φάκελο ml/raw_videos/{language}
+    και τα μετατρέπει σε .npy αρχεία στο ml/datasets/{language}/raw_landmarks.
+    """
+    raw_dir = os.path.join(PROJECT_ROOT, f"ml/raw_videos/{language}")
+    out_dir = os.path.join(PROJECT_ROOT, f"ml/datasets/{language}/raw_landmarks")
+    os.makedirs(out_dir, exist_ok=True)
+
+    if not os.path.exists(raw_dir):
+        print(f"[ERROR] Δεν βρέθηκε ο φάκελος: {raw_dir}")
+        return
+
+    extractor = LandmarkExtractor()
+    total_converted = 0
+
+    # Περιήγηση σε κάθε φάκελο-ετικέτα (π.χ. ΓΕΙΑ, ΕΥΧΑΡΙΣΤΩ)
+    for label in os.listdir(raw_dir):
+        label_dir = os.path.join(raw_dir, label)
+        if not os.path.isdir(label_dir):
+            continue
+
+        video_files = [f for f in os.listdir(label_dir) if f.endswith(('.mp4', '.avi', '.mov'))]
+        print(f"\n[INFO] Επεξεργασία {len(video_files)} βίντεο για τη λέξη: '{label}'")
+
+        for idx, v_file in enumerate(video_files):
+            v_path = os.path.join(label_dir, v_file)
+            npy_data = process_video_file(v_path, extractor)
+
+            save_name = f"{label}_open_{idx}_{int(np.random.randint(1000, 9999))}.npy"
+            save_path = os.path.join(out_dir, save_name)
+            np.save(save_path, npy_data)
+            print(f"  [{idx+1}/{len(video_files)}] {v_file} -> {save_name}")
+            total_converted += 1
+
+    extractor.close()
+    print(f"\n[SUCCESS] Ολοκληρώθηκε! Μετατράπηκαν συνολικά {total_converted} βίντεο.")
+
+
+if __name__ == "__main__":
+    lang = sys.argv[1] if len(sys.argv) > 1 else 'gsl'
+    convert_dataset_videos(language=lang)
+
+
+================================================
+FILE: scripts/test_m2_pipeline.py
+================================================
+[Binary file]
+
+
+================================================
+FILE: services/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: services/inference/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: services/inference/landmarks_pipeline.py
+================================================
+
+import os
+import time
+import cv2
+import numpy as np
+import mediapipe as mp
+from mediapipe.tasks import python as mp_tasks
+from mediapipe.tasks.python import vision as mp_vision
+
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
+
+# Τυπικές 21 συνδέσεις σημείων χεριού (MediaPipe hand landmark topology)
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),          # αντίχειρας
+    (0, 5), (5, 6), (6, 7), (7, 8),          # δείκτης
+    (5, 9), (9, 10), (10, 11), (11, 12),     # μέσος
+    (9, 13), (13, 14), (14, 15), (15, 16),   # παράμεσος
+    (13, 17), (17, 18), (18, 19), (19, 20),  # μικρό
+    (0, 17),                                 # παλάμη
+]
+
+
+class LandmarkExtractor:
+    """
+    Εξαγωγέας σημείων (Landmarks) χεριών με το νέο MediaPipe Tasks API.
+    """
+    def __init__(self, model_path: str = MODEL_PATH, num_hands: int = 2,
+                 min_detection_confidence: float = 0.5,
+                 min_tracking_confidence: float = 0.5):
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"[ERROR] Δεν βρέθηκε το μοντέλο: {model_path}\n"
+                "Κατέβασέ το από: "
+                "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+                "hand_landmarker/float16/latest/hand_landmarker.task"
+            )
+
+        base_options = mp_tasks.BaseOptions(model_asset_path=model_path)
+        options = mp_vision.HandLandmarkerOptions(
+            base_options=base_options,
+            running_mode=mp_vision.RunningMode.VIDEO,
+            num_hands=num_hands,
+            min_hand_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence,
+        )
+        self.landmarker = mp_vision.HandLandmarker.create_from_options(options)
+
+    def process_frame(self, frame: np.ndarray):
+        """
+        Επεξεργασία ενός frame, εξαγωγή landmarks, σχεδίαση και υπολογισμός latency.
+        """
+        start_time = time.perf_counter()
+
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+
+        timestamp_ms = int(time.time() * 1000)
+        result = self.landmarker.detect_for_video(mp_image, timestamp_ms)
+
+        annotated_image = frame.copy()
+        h, w = annotated_image.shape[:2]
+
+        if result.hand_landmarks:
+            for hand_landmarks in result.hand_landmarks:
+                points = [(int(lm.x * w), int(lm.y * h)) for lm in hand_landmarks]
+
+                for start_idx, end_idx in HAND_CONNECTIONS:
+                    cv2.line(annotated_image, points[start_idx], points[end_idx],
+                             (0, 200, 0), 2)
+
+                for (px, py) in points:
+                    cv2.circle(annotated_image, (px, py), 4, (0, 0, 255), -1)
+
+        latency_ms = (time.perf_counter() - start_time) * 1000.0
+        return annotated_image, result, latency_ms
+
+    def close(self):
+        self.landmarker.close()
+
+
+def run_webcam_demo():
+    """
+    Εκτέλεση live capture από την webcam με FPS overlay.
+    """
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("[ERROR] Δεν ήταν δυνατή η πρόσβαση στην κάμερα (Index 0).")
+        return
+
+    try:
+        extractor = LandmarkExtractor()
+    except FileNotFoundError as e:
+        print(e)
+        cap.release()
+        return
+
+    prev_time = time.time()
+
+    print("[INFO] Η κάμερα ξεκίνησε. Πίεσε 'q' για έξοδο.")
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("[WARN] Αποτυχία λήψης frame.")
+            break
+
+        annotated_frame, results, latency_ms = extractor.process_frame(frame)
+
+        curr_time = time.time()
+        fps = 1.0 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 0.0
+        prev_time = curr_time
+
+        cv2.putText(
+            annotated_frame, f"FPS: {fps:.1f} | Latency: {latency_ms:.1f}ms",
+            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
+        )
+
+        cv2.imshow("SignBridge - M1 Landmark Pipeline", annotated_frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    extractor.close()
+
+
+if __name__ == "__main__":
+    run_webcam_demo()
+
+
+================================================
+FILE: services/inference/live_inference.py
+================================================
+[Binary file]
+

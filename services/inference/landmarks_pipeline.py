@@ -1,4 +1,3 @@
-
 import os
 import time
 import cv2
@@ -44,6 +43,22 @@ class LandmarkExtractor:
             min_tracking_confidence=min_tracking_confidence,
         )
         self.landmarker = mp_vision.HandLandmarker.create_from_options(options)
+        self._last_ts_ms = 0
+
+    def detect(self, frame: np.ndarray):
+        """
+        Ελαφριά ανίχνευση για τον server: ΧΩΡΙΣ σχεδίαση και ΧΩΡΙΣ copy του frame.
+        Επιστρέφει το HandLandmarkerResult. Τα timestamps είναι αυστηρά αύξοντα
+        (απαίτηση του RunningMode.VIDEO), ανεξάρτητα από το ρολόι του συστήματος.
+        Η κάθε συνεδρία (session) πρέπει να έχει δικό της extractor, γιατί το
+        MediaPipe κρατά εσωτερική κατάσταση tracking ανάμεσα στα frames.
+        """
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+
+        timestamp_ms = max(int(time.perf_counter() * 1000), self._last_ts_ms + 1)
+        self._last_ts_ms = timestamp_ms
+        return self.landmarker.detect_for_video(mp_image, timestamp_ms)
 
     def process_frame(self, frame: np.ndarray):
         """
