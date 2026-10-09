@@ -1,4 +1,5 @@
 import { T } from '../strings';
+import { S } from '../stringsSentence';
 import type { PredictionPayload, ResultMessage, SubtitleEntry } from '../types';
 
 interface Props {
@@ -7,12 +8,13 @@ interface Props {
   roundTripMs: number;
   subtitles: SubtitleEntry[];
   threshold: number;
+  sentenceMode?: boolean;
 }
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 /** Ζωντανές πιθανότητες (top-k) με δείκτη ορίου, στατιστικά και ιστορικό υποτίτλων. */
-export function PredictionPanel({ prediction, result, roundTripMs, subtitles, threshold }: Props) {
+export function PredictionPanel({ prediction, result, roundTripMs, subtitles, threshold, sentenceMode = false }: Props) {
   return (
     <aside className="panel">
       <section>
@@ -46,7 +48,13 @@ export function PredictionPanel({ prediction, result, roundTripMs, subtitles, th
         <div><span>RTT</span><b>{roundTripMs ? `${roundTripMs.toFixed(0)} ms` : '—'}</b></div>
         <div>
           <span>{T.buffer}</span>
-          <b>{result ? `${result.buffer.filled}/${result.buffer.size}` : '—'}</b>
+          <b>
+            {result
+              ? sentenceMode
+                ? `${result.buffer.filled} ${S.frames}`
+                : `${result.buffer.filled}/${result.buffer.size}`
+              : '—'}
+          </b>
         </div>
       </section>
 

@@ -1,6 +1,6 @@
 // Τύποι που αντικατοπτρίζουν ακριβώς τα JSON μηνύματα του FastAPI gateway (services/api/main.py).
 
-export type Language = 'gsl' | 'asl';
+export type Language = 'gsl' | 'asl' | 'gsl_sentences';
 
 /** idle: δεν φαίνονται χέρια · collecting: γεμίζει ο buffer · sign: σταθερή αναγνώριση · uncertain: κάτω από το threshold */
 export type SessionState = 'idle' | 'collecting' | 'sign' | 'uncertain';
@@ -32,6 +32,11 @@ export interface ReadyMessage {
   stride: number;
   threshold: number;
   min_votes: number;
+  /** sign: λέξεις (κυλιόμενο παράθυρο) · sentence: πρόταση, απόφαση όταν κατεβαίνουν τα χέρια */
+  mode?: 'sign' | 'sentence';
+  seq_len?: number;
+  sentence_end_frames?: number;
+  sentence_max_frames?: number;
 }
 
 export interface ResultMessage {
@@ -86,6 +91,8 @@ export interface ModelInfo {
   available: boolean;
   num_classes?: number;
   labels?: string[];
+  mode?: 'sign' | 'sentence';
+  seq_len?: number;
   error?: string;
 }
 

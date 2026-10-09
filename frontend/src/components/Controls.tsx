@@ -1,4 +1,5 @@
 import { T } from '../strings';
+import { S } from '../stringsSentence';
 import type { HealthResponse, Language } from '../types';
 
 interface Props {
@@ -12,7 +13,10 @@ interface Props {
   health: HealthResponse | null;
 }
 
-const LANGS: Language[] = ['gsl', 'asl'];
+const LANGS: Language[] = ['gsl', 'asl', 'gsl_sentences'];
+
+// Ετικέτες που δεν υπάρχουν στο strings.ts (το μοντέλο προτάσεων).
+const LABEL_OVERRIDE: Partial<Record<Language, string>> = { gsl_sentences: S.langSentences };
 
 export function Controls({ language, onLanguage, running, onToggle, onReset, threshold, onThreshold, health }: Props) {
   return (
@@ -31,7 +35,7 @@ export function Controls({ language, onLanguage, running, onToggle, onReset, thr
               onClick={() => onLanguage(l)}
               title={available ? undefined : health?.models[l]?.error}
             >
-              {T[l]}
+              {LABEL_OVERRIDE[l] ?? T[l as 'gsl' | 'asl']}
               {!available && <small> · {T.noModel}</small>}
             </button>
           );

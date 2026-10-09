@@ -27,7 +27,7 @@ const FATAL_CODES = new Set([4400, 4404, 4500, 4501]);
  *   <video> → canvas → JPEG → WebSocket (binary) → JSON αποτελέσματα.
  *
  * Έλεγχος ροής: στέλνουμε ΕΝΑ frame και περιμένουμε την απάντησή του πριν στείλουμε το επόμενο.
- * Έτσι, αν το backend είναι πιο αργό από τα 15 fps, δεν δημιουργείται ουρά και καθυστέρηση.
+ * Έτσι, αν το backend είναι πιο αργό από τον ρυθμό αποστολής, δεν δημιουργείται ουρά και καθυστέρηση.
  */
 export function useSignStream({ videoRef, language, enabled }: Options) {
   const [status, setStatus] = useState<ConnectionStatus>('off');
@@ -119,7 +119,10 @@ export function useSignStream({ videoRef, language, enabled }: Options) {
             setReady(msg);
             setStatus('streaming');
             stopSending();
-            timer = window.setInterval(() => captureAndSend(ws), 1000 / STREAM.fps);
+            timer = window.setInterval(
+              () => captureAndSend(ws),
+              1000 / (msg.mode === 'sentence' ? STREAM.sentenceFps : STREAM.fps),
+            );
             break;
           case 'result':
             inFlight = false;

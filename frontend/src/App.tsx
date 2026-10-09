@@ -49,6 +49,8 @@ export default function App() {
     if (stream.status === 'error') void refresh();
   }, [stream.status, refresh]);
 
+  const sentenceMode = stream.ready?.mode === 'sentence';
+
   const errorMessage = camera.error ?? stream.error ?? (unreachable ? T.backendDown : null) ??
     (health && !health.landmarker_model ? T.landmarkerMissing : null);
 
@@ -77,7 +79,7 @@ export default function App() {
 
       <main className="layout">
         <VideoStage videoRef={videoRef} hands={stream.result?.hands ?? []}>
-          <SubtitleBar result={stream.result} subtitles={stream.subtitles} cameraOn={running} />
+          <SubtitleBar result={stream.result} subtitles={stream.subtitles} cameraOn={running} sentenceMode={sentenceMode} />
         </VideoStage>
         <PredictionPanel
           prediction={stream.prediction}
@@ -85,6 +87,7 @@ export default function App() {
           roundTripMs={stream.roundTripMs}
           subtitles={stream.subtitles}
           threshold={threshold}
+          sentenceMode={sentenceMode}
         />
       </main>
     </div>
