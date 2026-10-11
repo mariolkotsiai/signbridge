@@ -19,7 +19,7 @@ class ClientControl(BaseModel):
 class SequenceRequest(BaseModel):
     """Για το POST /api/predict/sequence: έτοιμα landmarks (T x 126), χωρίς κάμερα."""
 
-    language: Literal["gsl", "asl"]
+    language: Literal["gsl", "asl", "gsl_sentences"]
     sequence: list[list[float]] = Field(min_length=1, max_length=600)
 
     @field_validator("sequence")

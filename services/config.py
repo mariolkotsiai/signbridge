@@ -1,98 +1,119 @@
 """
-Ρυθμίσεις (configuration) για την υπηρεσία συμπερασμού (inference) του SignBridge.
+SignBridge - ρυθμίσεις του backend.
 
-Όλες οι τιμές μπορούν να αλλάξουν με μεταβλητές περιβάλλοντος SIGNBRIDGE_*
-(βλ. .env.example), χωρίς αλλαγή κώδικα.
+Όλες οι τιμές έχουν προεπιλογή και μπορούν να αλλάξουν με μεταβλητές περιβάλλοντος
+SIGNBRIDGE_<ΟΝΟΜΑ> (βλ. .env.example). Το Settings ελέγχει τις τιμές κατά τη δημιουργία του,
+ώστε ένα λάθος στο .env να φαίνεται αμέσως και όχι στη μέση μιας σύνδεσης.
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Callable, TypeVar
 
-T = TypeVar("T")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-INFERENCE_DIR = PROJECT_ROOT / "services" / "inference"
-
-# Πρέπει να ταιριάζει με το input_size του SignLanguageLSTM (2 χέρια * 21 σημεία * 3 συντεταγμένες).
+# Features ανά frame: 2 χέρια x 21 σημεία x (x, y, z).
 FEATURE_SIZE = 126
-# Το μήκος που περιμένει το μοντέλο (ίδιο με το target_frames του normalize_sequence).
+# Μήκος παραθύρου των μοντέλων ΛΕΞΕΩΝ (train.py). Τα μοντέλα προτάσεων γράφουν το δικό τους seq_len στο checkpoint.
 MODEL_SEQ_LEN = 30
 
+# "gsl_sentences" -> weights/gsl_sentences_model.pth (ml/training/train_sentences.py)
+DEFAULT_LANGUAGES = ("gsl", "asl", "gsl_sentences")
 
-def _env(name: str, default: T, cast: Callable[[str], T]) -> T:
-    """Διαβάζει SIGNBRIDGE_<name> από το περιβάλλον, με έλεγχο τύπου."""
-    raw = os.environ.get(f"SIGNBRIDGE_{name}")
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return cast(raw.strip())
-    except ValueError as exc:
-        raise ValueError(f"Μη έγκυρη τιμή για SIGNBRIDGE_{name}: {raw!r}") from exc
+ENV_PREFIX = "SIGNBRIDGE_"
+# Εναλλακτικά ονόματα μεταβλητών (το .env.example γράφει SIGNBRIDGE_LANDMARKER_MODEL, όχι ..._PATH).
+ENV_ALIASES = {"landmarker_model_path": ("LANDMARKER_MODEL",)}
 
 
-@dataclass(frozen=True)
+def _csv(value: str) -> tuple[str, ...]:
+    return tuple(p.strip() for p in value.split(",") if p.strip())
+
+
+@dataclass
 class Settings:
     # --- Αρχεία ---
-    weights_dir: Path = INFERENCE_DIR / "weights"
-    landmarker_model_path: Path = INFERENCE_DIR / "hand_landmarker.task"
-    languages: tuple[str, ...] = ("gsl", "asl")
+    weights_dir: Path = PROJECT_ROOT / "services" / "inference" / "weights"
+    landmarker_model_path: Path = PROJECT_ROOT / "services" / "inference" / "hand_landmarker.task"
+    languages: tuple[str, ...] = DEFAULT_LANGUAGES
 
-    # --- Buffering / ρυθμός inference ---
-    window_frames: int = 30        # μέγιστο μήκος sliding window (σε frames που στέλνει ο client)
-    min_frames: int = 15           # ελάχιστο μήκος για να τρέξει το πρώτο inference
-    stride: int = 3                # τρέχει inference κάθε N νέα frames
-    min_hand_ratio: float = 0.4    # ελάχιστο ποσοστό frames του window με ανιχνευμένο χέρι
-    idle_reset_frames: int = 8     # N συνεχόμενα frames χωρίς χέρι => IDLE (καθαρίζει buffer)
+    # --- Sliding window (μοντέλα λέξεων) ---
+    window_frames: int = 30
+    min_frames: int = 15
+    stride: int = 3
+    min_hand_ratio: float = 0.4
+    idle_reset_frames: int = 8
 
-    # --- Απόφαση / σταθεροποίηση υποτίτλων ---
-    threshold: float = 0.70        # ελάχιστη εμπιστοσύνη για να γίνει δεκτή μια πρόβλεψη
-    vote_window: int = 5           # πόσες τελευταίες προβλέψεις συμμετέχουν στην ψηφοφορία
-    min_votes: int = 3             # πόσες ίδιες ψήφοι χρειάζονται για "σταθερό" label
+    # --- Απόφαση / υπότιτλοι ---
+    threshold: float = 0.70
+    vote_window: int = 5
+    min_votes: int = 3
 
-    # --- Όρια / ασφάλεια ---
+    # --- Μοντέλα προτάσεων: το inference τρέχει όταν τελειώνει η πρόταση (κατεβαίνουν τα χέρια) ---
+    sentence_end_frames: int = 10     # frames χωρίς χέρια = τέλος πρότασης (~0.7 s στα 15 fps)
+    sentence_max_frames: int = 225    # ανώτατο μήκος πρότασης (~15 s στα 15 fps)· μετά κόβεται αναγκαστικά
+    sentence_min_frames: int = 10     # λιγότερα frames με χέρι = θόρυβος, αγνοείται
+    sentence_margin: int = 2          # frames-περιθώριο γύρω από την πρόταση (αν το checkpoint δεν ορίζει δικό του)
+
+    # --- Όρια ---
     max_sessions: int = 2
     max_frame_bytes: int = 2_000_000
-    max_frame_width: int = 640     # μεγαλύτερα frames κάνουν downscale πριν το MediaPipe
+    max_frame_width: int = 640
     torch_threads: int = 2
 
-    # --- CORS (μόνο για απευθείας κλήσεις από άλλο origin, π.χ. Vite χωρίς proxy) ---
-    cors_origins: tuple[str, ...] = ("http://localhost:5173", "http://127.0.0.1:5173")
+    # --- CORS ---
+    cors_origins: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if not (1 <= self.min_frames <= self.window_frames):
-            raise ValueError("Πρέπει 1 <= min_frames <= window_frames")
-        if self.stride < 1:
-            raise ValueError("Το stride πρέπει να είναι >= 1")
-        if not (0.0 < self.threshold <= 1.0):
-            raise ValueError("Το threshold πρέπει να είναι στο (0, 1]")
-        if not (1 <= self.min_votes <= self.vote_window):
-            raise ValueError("Πρέπει 1 <= min_votes <= vote_window")
-        if self.max_sessions < 1:
-            raise ValueError("Το max_sessions πρέπει να είναι >= 1")
+        self.weights_dir = Path(self.weights_dir)
+        self.landmarker_model_path = Path(self.landmarker_model_path)
+        self.languages = tuple(self.languages)
+        self.cors_origins = tuple(self.cors_origins)
+
+        if not self.languages:
+            raise ValueError("languages: χρειάζεται τουλάχιστον μία γλώσσα")
+        if not 0.0 < self.threshold <= 1.0:
+            raise ValueError(f"threshold πρέπει να είναι στο (0, 1], βρέθηκε {self.threshold}")
+        if not 0.0 <= self.min_hand_ratio <= 1.0:
+            raise ValueError(f"min_hand_ratio πρέπει να είναι στο [0, 1], βρέθηκε {self.min_hand_ratio}")
+        for name in ("window_frames", "min_frames", "stride", "idle_reset_frames", "vote_window", "min_votes",
+                     "sentence_end_frames", "sentence_max_frames", "sentence_min_frames",
+                     "max_sessions", "max_frame_bytes", "max_frame_width", "torch_threads"):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} πρέπει να είναι >= 1, βρέθηκε {getattr(self, name)}")
+        if self.sentence_margin < 0:
+            raise ValueError(f"sentence_margin πρέπει να είναι >= 0, βρέθηκε {self.sentence_margin}")
+        if self.min_frames > self.window_frames:
+            raise ValueError(f"min_frames ({self.min_frames}) > window_frames ({self.window_frames})")
+        if self.min_votes > self.vote_window:
+            raise ValueError(f"min_votes ({self.min_votes}) > vote_window ({self.vote_window})")
+        if self.sentence_min_frames > self.sentence_max_frames:
+            raise ValueError(f"sentence_min_frames ({self.sentence_min_frames}) > "
+                             f"sentence_max_frames ({self.sentence_max_frames})")
 
     @classmethod
-    def from_env(cls) -> "Settings":
-        d = cls()  # προεπιλογές
-        origins = _env("CORS_ORIGINS", None, lambda s: tuple(o.strip() for o in s.split(",") if o.strip()))
-        langs = _env("LANGUAGES", None, lambda s: tuple(x.strip().lower() for x in s.split(",") if x.strip()))
-        return cls(
-            weights_dir=_env("WEIGHTS_DIR", d.weights_dir, Path),
-            landmarker_model_path=_env("LANDMARKER_MODEL", d.landmarker_model_path, Path),
-            languages=langs or d.languages,
-            window_frames=_env("WINDOW_FRAMES", d.window_frames, int),
-            min_frames=_env("MIN_FRAMES", d.min_frames, int),
-            stride=_env("STRIDE", d.stride, int),
-            min_hand_ratio=_env("MIN_HAND_RATIO", d.min_hand_ratio, float),
-            idle_reset_frames=_env("IDLE_RESET_FRAMES", d.idle_reset_frames, int),
-            threshold=_env("THRESHOLD", d.threshold, float),
-            vote_window=_env("VOTE_WINDOW", d.vote_window, int),
-            min_votes=_env("MIN_VOTES", d.min_votes, int),
-            max_sessions=_env("MAX_SESSIONS", d.max_sessions, int),
-            max_frame_bytes=_env("MAX_FRAME_BYTES", d.max_frame_bytes, int),
-            max_frame_width=_env("MAX_FRAME_WIDTH", d.max_frame_width, int),
-            torch_threads=_env("TORCH_THREADS", d.torch_threads, int),
-            cors_origins=origins or d.cors_origins,
-        )
+    def from_env(cls, environ=None) -> "Settings":
+        """Διαβάζει τα SIGNBRIDGE_* από το περιβάλλον. Άγνωστες/κενές μεταβλητές αγνοούνται."""
+        env = os.environ if environ is None else environ
+        kwargs: dict = {}
+        for f in fields(cls):
+            names = (f.name.upper(),) + ENV_ALIASES.get(f.name, ())
+            var, raw = next(((ENV_PREFIX + n, env[ENV_PREFIX + n]) for n in names
+                             if (env.get(ENV_PREFIX + n) or "").strip()), (None, None))
+            if raw is None:
+                continue
+            raw = raw.strip()
+            try:
+                if f.name in ("weights_dir", "landmarker_model_path"):
+                    kwargs[f.name] = Path(raw)
+                elif f.name in ("languages", "cors_origins"):
+                    kwargs[f.name] = _csv(raw)
+                elif isinstance(f.default, bool):  # δεν υπάρχει σήμερα bool, αλλά να μη σπάσει αν προστεθεί
+                    kwargs[f.name] = raw.lower() in ("1", "true", "yes", "on")
+                elif isinstance(f.default, int):
+                    kwargs[f.name] = int(raw)
+                elif isinstance(f.default, float):
+                    kwargs[f.name] = float(raw)
+            except ValueError as exc:
+                raise ValueError(f"{var}={raw!r} δεν είναι έγκυρη τιμή") from exc
+        return cls(**kwargs)

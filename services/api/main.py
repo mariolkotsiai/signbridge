@@ -34,7 +34,7 @@ from pydantic import ValidationError
 
 from ml.preprocessing.normalize import normalize_sequence
 from services.api.schemas import ClientControl, SequencePrediction, SequenceRequest
-from services.config import MODEL_SEQ_LEN, PROJECT_ROOT, Settings
+from services.config import PROJECT_ROOT, Settings
 from services.inference.live_inference import (
     BadFrame,
     InferenceService,
@@ -107,7 +107,7 @@ def create_app(service: Optional[InferenceService] = None, settings: Optional[Se
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ModelLoadError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        window = normalize_sequence(req.sequence, target_frames=MODEL_SEQ_LEN)
+        window = normalize_sequence(req.sequence, target_frames=model.seq_len)
         top_k = format_top_k(model.predict_proba(window), model.labels, k=3)
         return SequencePrediction(language=req.language, label=top_k[0]["label"],
                                   confidence=top_k[0]["confidence"], top_k=top_k)

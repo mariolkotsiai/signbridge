@@ -17,7 +17,7 @@ Webcam → React (JPEG, 15 fps) → WebSocket → FastAPI → MediaPipe → buff
 | `services/config.py` | νέο | Όλες οι ρυθμίσεις, με override από μεταβλητές `SIGNBRIDGE_*` |
 | `services/inference/landmarks_pipeline.py` | **μικρή αλλαγή** | Προστέθηκε μέθοδος `detect()` (χωρίς σχεδίαση, με αυστηρά αύξοντα timestamps). Το `process_frame` δεν πειράχτηκε. |
 | `scripts/download_models.py` | νέο | Κατεβάζει το `hand_landmarker.task` |
-| `requirements.txt`, `.env.example` | ενημέρωση | Προστέθηκαν torch, scikit-learn, fastapi, uvicorn, httpx, yt-dlp |
+| `requirements.txt`, `.env.example` | ενημέρωση | Προστέθηκαν torch, fastapi, uvicorn, httpx, yt-dlp |
 | `ml/preprocessing/__init__.py`, `ml/training/__init__.py` | νέα (κενά) | Επιτρέπουν `python -m ml.training.train` |
 | `frontend/` | νέο | Vite + React + TypeScript |
 | `tests/`, `pytest.ini` | νέο | 34 tests |
@@ -89,11 +89,11 @@ curl http://127.0.0.1:8000/api/health
 
 ## 5. Πρωτόκολλο WebSocket (για αλλαγές στον client)
 
-`ws://host/ws/infer?language=gsl|asl`
+`ws://host/ws/infer?language=gsl|asl|gsl_sentences`
 
 | Κατεύθυνση | Μήνυμα |
 |---|---|
-| server → client | `{"type":"ready","labels":[…],"window_frames":30,"threshold":0.7,…}` |
+| server → client | `{"type":"ready","labels":[…],"window_frames":30,"threshold":0.7,"mode":"sign\|sentence","seq_len":30,…}` |
 | client → server | **binary** JPEG (ένα τη φορά· ο client περιμένει απάντηση πριν στείλει το επόμενο) |
 | server → client | `{"type":"result","state":"idle\|collecting\|sign\|uncertain","hands":[[[x,y]×21]],"prediction":{label,confidence,accepted,top_k,stable_label,committed}\|null,"buffer":{filled,size},"latency_ms","fps"}` |
 | client → server | `{"type":"config","threshold":0.8}` · `{"type":"reset"}` · `{"type":"ping"}` |
@@ -112,6 +112,32 @@ curl http://127.0.0.1:8000/api/health
 
 Το μοντέλο δεν έχει κλάση «κανένα νόημα», οπότε ο έλεγχος παρουσίας χεριών και το threshold είναι αυτά που αποτρέπουν τις τυχαίες προβλέψεις.
 
+### 6β. Μοντέλο προτάσεων (`gsl_sentences`)
+
+Το `ml/training/train_sentences.py` εκπαιδεύει σε ολόκληρες προτάσεις (CERTH GSL continuous) και γράφει στο checkpoint
+`seq_len` (π.χ. 60), `mode="sentence"` και `trim_margin`. Ο server τα διαβάζει και **δεν** χρησιμοποιεί κυλιόμενο παράθυρο:
+
+1. Η πρόταση ξεκινά με το πρώτο frame που έχει χέρι (`state: collecting`, χωρίς inference όσο φαίνονται χέρια).
+2. Τελειώνει όταν δεν φαίνεται χέρι για `SENTENCE_END_FRAMES` (10) συνεχόμενα frames, ή όταν φτάσει τα `SENTENCE_MAX_FRAMES` (225).
+   Μικρότερα κενά ανίχνευσης στη μέση δεν κόβουν την πρόταση.
+3. Τρέχει **ένα** inference πάνω σε όλη την αλληλουχία (με `trim_margin` frames χωρίς χέρια εκατέρωθεν, όπως στο training) και
+   `normalize_sequence(…, seq_len)`. Αν `confidence ≥ threshold` → **ένας** υπότιτλος (`committed`, `final: true`), αλλιώς `uncertain`.
+4. Πρόταση με < `SENTENCE_MIN_FRAMES` (10) frames με χέρι θεωρείται θόρυβος και αγνοείται.
+
+Το `prepare_sentences.py` κόβει τα frames χωρίς χέρια στην αρχή/τέλος (`--trim-margin`, προεπιλογή 2) και γράφει το `prep_meta.json`:
+αν αλλάξεις `--frames` ή `--trim-margin`, τα παλιά landmarks μετονομάζονται σε `landmarks_stale_*` και ξαναϋπολογίζονται.
+Το test `test_server_window_equals_training_window` εγγυάται ότι εκπαίδευση και server φτιάχνουν το ίδιο παράθυρο.
+
+Δοκιμή χωρίς να νοηματίσεις (παίζει δείγματα του test split, δηλαδή signers που δεν είδε το μοντέλο):
+
+```powershell
+python -m services.inference.live_inference --language gsl_sentences --play-test 20 --subsample 2
+python -m services.inference.live_inference --language gsl_sentences --play-dir "D:\...\health1_signer6_rep1_sentences\sentences0003"
+```
+
+Το `--subsample 2` κρατά 1 frame στα 2 (το dataset είναι πιθανόν σε μεγαλύτερο fps από τα ~15 fps του browser, και τα
+`SENTENCE_END_FRAMES` μετριούνται σε frames). Η αναφορά δείχνει σωστά/λάθος ανά δείγμα και συνολικό ποσοστό.
+
 ## 7. Ρυθμίσεις που αξίζει να δοκιμάσεις
 
 Στο `.env` (ή από το slider στο UI για το threshold):
@@ -121,6 +147,7 @@ curl http://127.0.0.1:8000/api/health
 | `SIGNBRIDGE_THRESHOLD` | Με μικρό dataset οι πιθανότητες είναι χαμηλές → χαμήλωσέ το (0.5–0.6) για δοκιμές |
 | `SIGNBRIDGE_WINDOW_FRAMES` | Τα νοήματα του dataset σου διαρκούν πολύ περισσότερο/λιγότερο από ~2 s (στα 15 fps) |
 | `SIGNBRIDGE_MIN_VOTES` / `VOTE_WINDOW` | Τρεμοπαίζουν οι υπότιτλοι → αύξησε· αργούν → μείωσε |
+| `SIGNBRIDGE_SENTENCE_END_FRAMES` | Μόνο μοντέλο προτάσεων: ο υπότιτλος βγαίνει πολύ νωρίς/αργά μετά το κατέβασμα των χεριών → μείωσε/αύξησε |
 | `SIGNBRIDGE_MAX_SESSIONS` | Πόσες ταυτόχρονες κάμερες δέχεται (κάθε μία έχει δικό της MediaPipe) |
 
 Στο `frontend/src/config.ts`: `STREAM.fps` (15), `jpegQuality`, `maxWidth`.
@@ -154,4 +181,5 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
-Το test `tests/conftest.py` εκπαιδεύει πραγματικά με το `ml/training/train.py` σε συνθετικά δεδομένα και φορτώνει το αποτέλεσμα στον server, ώστε να πιάνει ασυμβατότητες στο format των βαρών. Δεν απαιτεί κάμερα ή `hand_landmarker.task`.
+Το test `tests/conftest.py` εκπαιδεύει πραγματικά με το `ml/training/train.py` σε συνθετικά δεδομένα και φορτώνει το αποτέλεσμα στον server, ώστε να πιάνει ασυμβατότητες στο format των βαρών. Το `tests/test_sentence_mode.py` κάνει το ίδιο με το `train_sentences.py` (μοντέλο προτάσεων) και ελέγχει τη λογική «τέλος πρότασης», το replay και την ισοδυναμία παραθύρου εκπαίδευσης/server.
+Δεν απαιτεί κάμερα ή `hand_landmarker.task`.

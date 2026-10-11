@@ -11,13 +11,33 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
 
 try:
     from ml.models.sign_model import SignLanguageLSTM
 except ModuleNotFoundError:
     # Fallback σε περίπτωση που εκτελείται από διαφορετικό Working Directory
     from models.sign_model import SignLanguageLSTM
+
+
+def train_test_split(X, y, test_size=0.2, random_state=42):
+    """
+    Τυχαίος διαχωρισμός train/val με numpy. Αντικαθιστά το sklearn.model_selection.train_test_split,
+    γιατί το App Control των Windows μπορεί να μπλοκάρει τα DLL του scikit-learn (import error).
+    Δίνει ΤΟΝ ΙΔΙΟ διαχωρισμό με το sklearn για την ίδια τιμή random_state
+    (RandomState(seed).permutation, πρώτα τα δείγματα val, με ceil(test_size * n) δείγματα).
+    Επιστρέφει X_train, X_val, y_train, y_val.
+    """
+    n = len(X)
+    if n != len(y):
+        raise ValueError(f"X και y έχουν διαφορετικό μήκος: {n} != {len(y)}")
+    if not 0.0 < test_size < 1.0:
+        raise ValueError(f"test_size πρέπει να είναι μεταξύ 0 και 1, βρέθηκε {test_size}")
+    n_val = int(np.ceil(test_size * n))
+    if n_val < 1 or n - n_val < 1:
+        raise ValueError(f"Χρειάζονται τουλάχιστον 2 δείγματα για διαχωρισμό train/val (βρέθηκαν {n}).")
+    order = np.random.RandomState(random_state).permutation(n)
+    val_idx, train_idx = order[:n_val], order[n_val:]
+    return X[train_idx], X[val_idx], y[train_idx], y[val_idx]
 
 
 class LandmarkDataset(Dataset):
